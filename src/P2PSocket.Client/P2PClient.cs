@@ -6,6 +6,7 @@ using P2PSocket.Core.Models;
 using P2PSocket.Core.Utils;
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
@@ -15,63 +16,50 @@ namespace P2PSocket.Client
 {
     public class P2PClient
     {
-        public List<TcpListener> ListenerList { set; get; } = new List<TcpListener>();
         public P2PClient()
         {
 
         }
 
-        public void StartServer()
-        {
-            //连接服务器
-            ConnectServer();
-            //启动端口映射
-            StartPortMap();
-            //断线重连功能
-            Global.TaskFactory.StartNew(() => TestAndReconnectServer());
-        }
-
-        private void ConnectServer()
+        internal void ConnectServer()
         {
             try
             {
-                Global.P2PServerTcp = new P2PTcpClient(Global.ServerAddress, Global.ServerPort);
+                TcpCenter.Instance.P2PServerTcp = new P2PTcpClient(ConfigCenter.Instance.ServerAddress, ConfigCenter.Instance.ServerPort);
             }
             catch
             {
-                Global.P2PServerTcp = null;
-                LogUtils.Error($"{DateTime.Now.ToString("[HH:mm:ss]")}无法连接服务器:{Global.ServerAddress}:{Global.ServerPort}");
+                LogUtils.Error($"{DateTime.Now.ToString("HH:mm:ss")} 无法连接服务器:{ConfigCenter.Instance.ServerAddress}:{ConfigCenter.Instance.ServerPort}");
+                return;
             }
-            if (Global.P2PServerTcp != null)
+            LogUtils.Info($"{DateTime.Now.ToString("HH:mm:ss")} 已连接服务器:{ConfigCenter.Instance.ServerAddress}:{ConfigCenter.Instance.ServerPort}", false);
+            TcpCenter.Instance.P2PServerTcp.IsAuth = true;
+            AppCenter.Instance.StartNewTask(() =>
             {
-                LogUtils.Show($"{DateTime.Now.ToString("[HH:mm:ss]")}成功连接服务器:{Global.ServerAddress}:{Global.ServerPort}");
-                Global.P2PServerTcp.IsAuth = true;
-                //接收数据
-                Global.TaskFactory.StartNew(() =>
-                {
-                    //向服务器发送客户端信息
-                    InitServerInfo(Global.P2PServerTcp);
-                    //监听来自服务器的消息
-                    Global_Func.ListenTcp<ReceivePacket>(Global.P2PServerTcp);
-                });
-            }
+                //向服务器发送客户端信息
+                InitServerInfo(TcpCenter.Instance.P2PServerTcp);
+                //监听来自服务器的消息
+                Global_Func.ListenTcp<ReceivePacket>(TcpCenter.Instance.P2PServerTcp);
+            });
         }
 
-        public void TestAndReconnectServer()
+        internal void TestAndReconnectServer()
         {
+            Guid curGuid = AppCenter.Instance.CurrentGuid;
             while (true)
             {
                 Thread.Sleep(5000);
-                if (Global.P2PServerTcp != null)
+                if (curGuid != AppCenter.Instance.CurrentGuid) break;
+                if (TcpCenter.Instance.P2PServerTcp != null)
                 {
                     try
                     {
-                        Global.P2PServerTcp.Client.Send(new Send_0x0052().PackData());
+                        TcpCenter.Instance.P2PServerTcp.Client.Send(new Send_0x0052().PackData());
                     }
                     catch (Exception ex)
                     {
-                        LogUtils.Warning($"{DateTime.Now.ToString("HH:mm:ss")}服务器Tcp已断开");
-                        Global.P2PServerTcp = null;
+                        LogUtils.Warning($"{DateTime.Now.ToString("HH:mm:ss")} 服务器连接已被断开");
+                        TcpCenter.Instance.P2PServerTcp = null;
                     }
                 }
                 else
@@ -88,7 +76,7 @@ namespace P2PSocket.Client
         private void InitServerInfo(P2PTcpClient tcpClient)
         {
             Send_0x0101 sendPacket = new Send_0x0101();
-            LogUtils.Info($"注册客户端：{Global.ClientName}");
+            LogUtils.Info($"客户端名称：{ConfigCenter.Instance.ClientName}");
             tcpClient.Client.Send(sendPacket.PackData());
         }
 
@@ -96,74 +84,96 @@ namespace P2PSocket.Client
         /// <summary>
         ///     监听映射端口
         /// </summary>
-        private void StartPortMap()
+        internal void StartPortMap()
         {
-            if (Global.PortMapList.Count == 0) return;
-            foreach (PortMapItem item in Global.PortMapList)
+            if (ConfigCenter.Instance.PortMapList.Count == 0) return;
+            Dictionary<string, TcpListener> curListenerList = TcpCenter.Instance.ListenerList;
+            TcpCenter.Instance.ListenerList = new Dictionary<string, TcpListener>();
+            foreach (PortMapItem item in ConfigCenter.Instance.PortMapList)
             {
-                Global.TaskFactory.StartNew(() =>
+                string key = $"{item.LocalAddress}:{item.LocalPort}";
+                if (curListenerList.ContainsKey(key))
                 {
-                    try
-                    {
-                        if (item.MapType == PortMapType.ip)
-                        {
-                            ListenPortMapPortWithIp(item);
-                        }
-                        else
-                        {
-                            ListenPortMapPortWithServerName(item);
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        LogUtils.Error(ex.Message);
-                    }
-                });
+                    LogUtils.Trace($"正在监听端口：{key}");
+                    TcpCenter.Instance.ListenerList.Add(key, curListenerList[key]);
+                    curListenerList.Remove(key);
+                    continue;
+                }
+                if (item.MapType == PortMapType.ip)
+                {
+                    ListenPortMapPortWithIp(item);
+                }
+                else
+                {
+                    ListenPortMapPortWithServerName(item);
+                }
+            }
+            foreach (TcpListener listener in curListenerList.Values)
+            {
+                LogUtils.Trace($"停止端口监听：{listener.LocalEndpoint.ToString()}");
+                listener.Stop();
             }
         }
 
         private void ListenPortMapPortWithServerName(PortMapItem item)
         {
-            TcpListener listener = new TcpListener(string.IsNullOrEmpty(item.LocalAddress) ? IPAddress.Any : IPAddress.Parse(item.LocalAddress), item.LocalPort);
+            TcpListener listener = null;
             try
             {
+                listener = new TcpListener(string.IsNullOrEmpty(item.LocalAddress) ? IPAddress.Any : IPAddress.Parse(item.LocalAddress), item.LocalPort);
                 listener.Start();
             }
             catch (SocketException ex)
             {
                 LogUtils.Error($"端口映射失败：{item.LocalPort}->{item.RemoteAddress}:{item.RemotePort}{Environment.NewLine}{ex.Message}");
+                return;
             }
-            ListenerList.Add(listener);
-            LogUtils.Show($"端口映射成功：{item.LocalPort}->{item.RemoteAddress}:{item.RemotePort}");
-            Global.TaskFactory.StartNew(() =>
+            TcpCenter.Instance.ListenerList.Add($"{item.LocalAddress}:{item.LocalPort}", listener);
+            LogUtils.Info($"端口映射：{item.LocalPort}->{item.RemoteAddress}:{item.RemotePort}", false);
+            AppCenter.Instance.StartNewTask(() =>
             {
                 while (true)
                 {
-                    Socket socket = listener.AcceptSocket();
-                    //获取目标tcp
-                    if (Global.P2PServerTcp != null && Global.P2PServerTcp.Connected)
+                    Socket socket = null;
+                    try
                     {
-                        Global.TaskFactory.StartNew(() =>
+                        socket = listener.AcceptSocket();
+                    }
+                    catch
+                    {
+                        break;
+                    }
+                    //获取目标tcp
+                    if (TcpCenter.Instance.P2PServerTcp != null && TcpCenter.Instance.P2PServerTcp.Connected)
+                    {
+                        AppCenter.Instance.StartNewTask(() =>
                         {
                             P2PTcpClient tcpClient = new P2PTcpClient(socket);
                             //加入待连接集合
-                            Global.WaiteConnetctTcp.Add(tcpClient.Token, tcpClient);
+                            TcpCenter.Instance.WaiteConnetctTcp.Add(tcpClient.Token, tcpClient);
                             //发送p2p申请
-                            Send_0x0201_Apply packet = new Send_0x0201_Apply(tcpClient.Token, item.RemoteAddress, item.RemotePort);
-                            LogUtils.Info($"正在建立内网穿透（3端）通道 token:{tcpClient.Token} client:{item.RemoteAddress} port:{item.RemotePort}");
+                            Send_0x0201_Apply packet = new Send_0x0201_Apply(tcpClient.Token, item.RemoteAddress, item.RemotePort, item.P2PType);
+                            if (item.P2PType == 0)
+                            {
+                                LogUtils.Info($"建立内网穿透（转发模式）通道 token:{tcpClient.Token} client:{item.RemoteAddress} port:{item.RemotePort}");
+                            }
+                            else
+                            {
+                                LogUtils.Info($"建立内网穿透（P2P模式）通道 token:{tcpClient.Token} client:{item.RemoteAddress} port:{item.RemotePort}");
+                            }
                             try
                             {
-                                Global.P2PServerTcp.Client.Send(packet.PackData());
+                                TcpCenter.Instance.P2PServerTcp.Client.Send(packet.PackData());
                             }
                             finally
                             {
                                 //如果5秒后没有匹配成功，则关闭连接
-                                Thread.Sleep(Global.P2PTimeout);
-                                if (Global.WaiteConnetctTcp.ContainsKey(tcpClient.Token))
+                                Thread.Sleep(ConfigCenter.P2PTimeout);
+                                if (TcpCenter.Instance.WaiteConnetctTcp.ContainsKey(tcpClient.Token))
                                 {
-                                    LogUtils.Warning($"内网穿透失败：token:{tcpClient.Token} {item.LocalPort}->{item.RemoteAddress}:{item.RemotePort} {Global.P2PTimeout}秒无响应，已超时.");
-                                    Global.WaiteConnetctTcp[tcpClient.Token].Close();
-                                    Global.WaiteConnetctTcp.Remove(tcpClient.Token);
+                                    LogUtils.Warning($"内网穿透失败：token:{tcpClient.Token} {item.LocalPort}->{item.RemoteAddress}:{item.RemotePort} {ConfigCenter.P2PTimeout / 1000}秒无响应，已超时.");
+                                    TcpCenter.Instance.WaiteConnetctTcp[tcpClient.Token].SafeClose();
+                                    TcpCenter.Instance.WaiteConnetctTcp.Remove(tcpClient.Token);
                                 }
 
                             }
@@ -184,24 +194,26 @@ namespace P2PSocket.Client
         /// <param name="item"></param>
         private void ListenPortMapPortWithIp(PortMapItem item)
         {
-            TcpListener listener = new TcpListener(string.IsNullOrEmpty(item.LocalAddress) ? IPAddress.Any : IPAddress.Parse(item.LocalAddress), item.LocalPort);
+            TcpListener listener = null;
             try
             {
+                listener = new TcpListener(string.IsNullOrEmpty(item.LocalAddress) ? IPAddress.Any : IPAddress.Parse(item.LocalAddress), item.LocalPort);
                 listener.Start();
             }
             catch (Exception ex)
             {
-                LogUtils.Error($"端口映射失败：{item.LocalPort}->{item.RemoteAddress}:{item.RemotePort}{Environment.NewLine}{ex.ToString()}");
+                LogUtils.Error($"添加端口映射失败：{item.LocalPort}->{item.RemoteAddress}:{item.RemotePort}{Environment.NewLine}{ex.ToString()}");
+                return;
             }
-            ListenerList.Add(listener);
-            LogUtils.Show($"端口映射成功：{item.LocalPort}->{item.RemoteAddress}:{item.RemotePort}");
-            Global.TaskFactory.StartNew(() =>
+            TcpCenter.Instance.ListenerList.Add($"{item.LocalAddress}:{item.LocalPort}", listener);
+            LogUtils.Info($"添加端口映射成功：{item.LocalPort}->{item.RemoteAddress}:{item.RemotePort}", false);
+            AppCenter.Instance.StartNewTask(() =>
             {
                 while (true)
                 {
                     Socket socket = listener.AcceptSocket();
                     P2PTcpClient tcpClient = new P2PTcpClient(socket);
-                    Global.TaskFactory.StartNew(() =>
+                    AppCenter.Instance.StartNewTask(() =>
                     {
                         P2PTcpClient ipClient = null;
                         try
@@ -210,15 +222,15 @@ namespace P2PSocket.Client
                         }
                         catch (Exception ex)
                         {
-                            tcpClient.Close();
+                            tcpClient.SafeClose();
                             LogUtils.Error($"内网穿透失败：{item.LocalPort}->{item.RemoteAddress}:{item.RemotePort}{Environment.NewLine}{ex}");
                         }
                         if (ipClient.Connected)
                         {
                             tcpClient.ToClient = ipClient;
                             ipClient.ToClient = tcpClient;
-                            Global.TaskFactory.StartNew(() => ListenPortMapTcpWithIp(tcpClient));
-                            Global.TaskFactory.StartNew(() => ListenPortMapTcpWithIp(tcpClient.ToClient));
+                            AppCenter.Instance.StartNewTask(() => ListenPortMapTcpWithIp(tcpClient));
+                            AppCenter.Instance.StartNewTask(() => ListenPortMapTcpWithIp(tcpClient.ToClient));
                         }
                     });
                 }
@@ -234,9 +246,10 @@ namespace P2PSocket.Client
             if (readClient.ToClient == null || !readClient.ToClient.Connected)
             {
                 LogUtils.Warning($"数据转发（ip模式）失败：绑定的Tcp连接已断开.");
-                readClient.Close();
+                readClient.SafeClose();
                 return;
             }
+            TcpCenter.Instance.ConnectedTcpList.Add(readClient);
             byte[] buffer = new byte[P2PGlobal.P2PSocketBufferSize];
             try
             {
@@ -251,11 +264,11 @@ namespace P2PSocket.Client
                     }
                     else
                     {
-                        LogUtils.Warning($"数据转发（ip模式）失败：Tcp连接已断开.");
+                        LogUtils.Warning($"端口映射转发（ip模式）：源Tcp连接已断开.");
                         //如果tcp已关闭，需要关闭相关tcp
                         try
                         {
-                            readClient.ToClient.Close();
+                            readClient.ToClient.SafeClose();
                         }
                         finally
                         {
@@ -266,9 +279,10 @@ namespace P2PSocket.Client
             }
             catch (Exception ex)
             {
-                LogUtils.Warning($"【失败】IP数据转发：目标Tcp连接已断开.");
-                readClient.Close();
+                LogUtils.Warning($"端口映射转发（ip模式）：目标Tcp连接已断开.");
+                readClient.SafeClose();
             }
+            TcpCenter.Instance.ConnectedTcpList.Remove(readClient);
         }
     }
 }

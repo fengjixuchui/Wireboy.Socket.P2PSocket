@@ -1,12 +1,10 @@
 # Wireboy.Socket.P2PSocket
 
-这是一个跨平台的项目，客户端与服务端使用standard2.0开发，StartUp项目使用.netcore2.1开发。
-
-服务端与客户端均通过StartUp启动，在StartUp.dll所在目录下新建目录P2PSocket，将服务端和客户端dll拷贝到P2PSocket即可使用。
+这是一个跨平台的项目，支持Windows、Linux、树莓派等操作系统，开发环境：.Net Core2.1
 
 喜欢此项目的，请点击一下右上角的Star
 
-加入QQ群417159195，与作者共同交流，入群途径请填写“P2PSocket”
+有任何问题，加入QQ群417159195，与作者共同交流，入群途径请填写“P2PSocket”，欢迎大家入群后给群主发红包~
 
 ## 你好，程序员们
 
@@ -26,7 +24,13 @@
 
 1.master分支版本作为稳定版本。
 
-2.dev分支版本为开发者活跃版本，新功能在dev版本稳定后，会与master分支合并。
+2.dev分支版本为开发者活跃版本，dev版本稳定后，将与master分支合并。
+
+## 视频教程
+
+1. [P2PSocket如何编译可执行文件](https://www.bilibili.com/video/BV1ue41147p1/)
+
+2. [简单使用P2PSocket进行远程桌面](https://www.bilibili.com/video/BV1XE411K7ca/)
 
 ## 网络结构
 
@@ -82,6 +86,12 @@
 
 
 ## 更新日志
+
+### 2020年2月20日 - 3.0.0版本发布
+
+1.新增P2P打洞模式，不再通过服务器中转数据
+
+2.增加配置文件重载
 
 ### 2019年9月5日 - 增加身份认证
 

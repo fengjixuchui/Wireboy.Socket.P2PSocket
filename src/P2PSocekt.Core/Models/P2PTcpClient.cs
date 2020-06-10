@@ -27,6 +27,13 @@ namespace P2PSocket.Core.Models
             m_localEndPoint = socket.LocalEndPoint.ToString();
             this.NoDelay = true;
         }
+
+        public void UpdateEndPoint()
+        {
+            m_remoteEndPoint = Client.RemoteEndPoint.ToString();
+            m_localEndPoint = Client.LocalEndPoint.ToString();
+        }
+
         public P2PTcpClient(string hostname, int port) : base()
         {
             this.NoDelay = true;
@@ -238,6 +245,21 @@ namespace P2PSocket.Core.Models
             return client;
         }
 
+        public void SafeClose()
+        {
+            if(this.Connected)
+            {
+                try
+                {
+                    this.Close();
+                }
+                finally
+                {
+
+                }
+            }
+        }
+
         public string Token { set; get; } = Guid.NewGuid().ToString();
         public P2PTcpClient ToClient { set; get; }
         /// <summary>
@@ -253,6 +275,7 @@ namespace P2PSocket.Core.Models
 
         public bool IsDisConnected { get => LastHeartTime.AddSeconds(15) <= DateTime.Now; }
 
+        public int P2PLocalPort { set; get; } = -1;
         String m_remoteEndPoint = "";
         String m_localEndPoint = "";
         public String RemoteEndPoint

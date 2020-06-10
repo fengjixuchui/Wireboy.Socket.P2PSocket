@@ -24,21 +24,28 @@ namespace P2PSocket.Server
             try
             {
                 LogUtils.InitConfig();
-                LogUtils.Info($"程序版本:{Global.SoftVerSion}  通讯协议:{Global.DataVerSion}");
+                LogUtils.Info($"客户端版本:{AppCenter.Instance.SoftVerSion} 作者：wireboy", false);
+                LogUtils.Info($"github地址：https://github.com/bobowire/Wireboy.Socket.P2PSocket", false);
                 //读取配置文件
                 if (ConfigUtils.IsExistConfig())
                 {
                     //初始化全局变量
                     InitGlobal();
                     //加载配置文件
-                    ConfigUtils.LoadFromFile();
+                    ConfigCenter config = ConfigUtils.LoadFromFile();
+                    ConfigCenter.LoadConfig(config);
+                    FileSystemWatcher fw = new FileSystemWatcher(Path.Combine(AppCenter.Instance.RuntimePath, "P2PSocket"), "Server.ini")
+                    {
+                        NotifyFilter = NotifyFilters.LastWrite
+                    };
+                    fw.Changed += Fw_Changed;
+                    fw.EnableRaisingEvents = true;
                     //启动服务
                     P2PServer.StartServer();
-                    //todo:控制台显示
                 }
                 else
                 {
-                    LogUtils.Error($"找不到配置文件.{Global.ConfigFile}");
+                    LogUtils.Error($"找不到配置文件.{AppCenter.Instance.ConfigFile}");
                 }
             }
             catch(Exception ex)
@@ -50,11 +57,17 @@ namespace P2PSocket.Server
 
         public void Stop()
         {
-            Global.CurrentGuid = Guid.NewGuid();
+            AppCenter.Instance.CurrentGuid = Guid.NewGuid();
             foreach (var listener in P2PServer.ListenerList)
             {
                 listener.Stop();
             }
+            P2PServer.ListenerList.Clear();
+            foreach (var tcpItem in ClientCenter.Instance.TcpMap)
+            {
+                tcpItem.Value.TcpClient.Close();
+            }
+            ClientCenter.Instance.TcpMap.Clear();
         }
         /// <summary>
         ///     初始化全局变量
@@ -80,10 +93,56 @@ namespace P2PSocket.Server
                     continue;
                 }
                 CommandFlag flag = attributes.First(t => t is CommandFlag) as CommandFlag;
-                if (!Global.CommandDict.ContainsKey(flag.CommandType))
+                if (!AppCenter.Instance.CommandDict.ContainsKey(flag.CommandType))
                 {
-                    Global.CommandDict.Add(flag.CommandType, type);
+                    AppCenter.Instance.CommandDict.Add(flag.CommandType, type);
                 }
+            }
+        }
+
+        public void Restart(ConfigCenter config)
+        {
+            Stop();
+            System.Threading.Thread.Sleep(2000);
+            if (config == null)
+            {
+                //读取配置文件
+                if (ConfigUtils.IsExistConfig())
+                {
+                    //加载配置文件
+                    try
+                    {
+                        config = ConfigUtils.LoadFromFile();
+                    }
+                    catch (Exception ex)
+                    {
+                        LogUtils.Error($"加载配置文件Server.ini失败：{Environment.NewLine}{ex}");
+                        return;
+                    }
+                }
+                else
+                {
+                    LogUtils.Error($"找不到配置文件.{AppCenter.Instance.ConfigFile}");
+                    return;
+                }
+            }
+            //启动服务
+            AppCenter.Instance.CurrentGuid = Guid.NewGuid();
+            ConfigCenter.LoadConfig(config);
+            //启动服务
+            P2PServer.StartServer();
+        }
+
+        DateTime lastUpdateConfig = DateTime.Now;
+        object fwObj = new object();
+        private void Fw_Changed(object sender, FileSystemEventArgs e)
+        {
+            DateTime curTime = DateTime.Now;
+            lock (fwObj)
+            {
+                if (DateTime.Compare(lastUpdateConfig.AddSeconds(5), curTime) > 0) return;
+                lastUpdateConfig = DateTime.Now;
+                Restart(null);
             }
         }
     }
