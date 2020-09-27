@@ -3,6 +3,7 @@ using P2PSocket.Core;
 using P2PSocket.Core.Commands;
 using P2PSocket.Core.Extends;
 using P2PSocket.Core.Models;
+using P2PSocket.Core.Utils;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -16,93 +17,225 @@ namespace P2PSocket.Client
 
     public static class Global_Func
     {
+        public struct RelationTcp_Server
+        {
+            public P2PTcpClient readTcp;
+            public byte[] buffer;
+            public ReceivePacket msgReceive;
+            public Guid guid;
+        }
         public static void ListenTcp<T>(P2PTcpClient tcpClient) where T : ReceivePacket
         {
-            TcpCenter.Instance.ConnectedTcpList.Add(tcpClient);
-            try
+            RelationTcp_Server relationSt = new RelationTcp_Server();
+            relationSt.buffer = new byte[P2PGlobal.P2PSocketBufferSize];
+            relationSt.readTcp = tcpClient;
+            relationSt.msgReceive = Activator.CreateInstance(typeof(T)) as ReceivePacket;
+            relationSt.guid = EasyInject.Get<AppCenter>().CurrentGuid;
+            relationSt.readTcp.GetStream().BeginRead(relationSt.buffer, 0, relationSt.buffer.Length, ReadTcp_Server, relationSt);
+        }
+
+        private static void ReadTcp_Server(IAsyncResult ar)
+        {
+            RelationTcp_Server relation = (RelationTcp_Server)ar.AsyncState;
+            if (relation.guid == EasyInject.Get<AppCenter>().CurrentGuid)
             {
-                Guid curGuid = AppCenter.Instance.CurrentGuid;
-                byte[] buffer = new byte[P2PGlobal.P2PSocketBufferSize];
-                NetworkStream tcpStream = tcpClient.GetStream();
-                ReceivePacket msgReceive = Activator.CreateInstance(typeof(T)) as ReceivePacket;
-                while (tcpClient.Connected && curGuid == AppCenter.Instance.CurrentGuid)
+                if (relation.readTcp.Connected && relation.readTcp.GetStream().CanRead)
                 {
-                    int curReadLength = tcpStream.ReadSafe(buffer, 0, buffer.Length);
-                    if (curReadLength > 0)
+                    int length = 0;
+                    EasyOp.Do(() =>
                     {
-                        byte[] refData = buffer.Take(curReadLength).ToArray();
-                        while (msgReceive.ParseData(ref refData))
+                        length = relation.readTcp.GetStream().EndRead(ar);
+                    }, () =>
+                    {
+                        if (length > 0)
                         {
-                            LogUtils.Debug($"命令类型:{msgReceive.CommandType}");
-                            // 执行command
-                            using (P2PCommand command = FindCommand(tcpClient, msgReceive))
+                            byte[] refData = relation.buffer.Take(length).ToArray();
+                            while (relation.msgReceive.ParseData(ref refData))
                             {
-                                command?.Excute();
+                                // 执行command
+                                using (P2PCommand command = FindCommand(relation.readTcp, relation.msgReceive))
+                                {
+                                    //LogUtils.Trace($"命令类型:{relation.msgReceive.CommandType}");
+                                    if (command != null)
+                                    {
+                                        bool isSuccess = false;
+                                        EasyOp.Do(() =>
+                                        {
+                                            isSuccess = command.Excute();
+                                        },
+                                        e =>
+                                        {
+                                            LogUtils.Error($"执行命令{relation.msgReceive.CommandType}时发生异常:{e}");
+                                        });
+                                        if (!isSuccess)
+                                        {
+                                            EasyOp.Do(() => { relation.readTcp?.SafeClose(); });
+                                            EasyOp.Do(() => { relation.readTcp.ToClient?.SafeClose(); });
+                                            return;
+                                        }
+                                    }
+                                    else
+                                    {
+                                        EasyOp.Do(() => { relation.readTcp?.SafeClose(); });
+                                        EasyOp.Do(() => { relation.readTcp.ToClient?.SafeClose(); });
+                                        return;
+                                    }
+                                }
+                                //重置msgReceive
+                                relation.msgReceive.Reset();
+                                if (refData.Length <= 0) break;
                             }
-                            //重置msgReceive
-                            msgReceive.Reset();
-                            if (refData.Length <= 0) break;
+                            if (relation.readTcp.Connected)
+                            {
+                                EasyOp.Do(() =>
+                                {
+                                    relation.readTcp.GetStream().BeginRead(relation.buffer, 0, relation.buffer.Length, ReadTcp_Server, relation);
+                                }, ex =>
+                                {
+                                    LogUtils.Debug($"Tcp连接已被断开 {relation.readTcp.RemoteEndPoint}");
+                                    EasyOp.Do(() => { relation.readTcp.ToClient?.SafeClose(); });
+                                });
+                            }
+                        }
+                        else
+                        {
+                            EasyOp.Do(() => { relation.readTcp?.SafeClose(); });
+                            EasyOp.Do(() => { relation.readTcp.ToClient?.SafeClose(); });
+
+                        }
+                    }, ex =>
+                    {
+                        LogUtils.Debug($"Tcp连接已被断开 {relation.readTcp.RemoteEndPoint}");
+                        EasyOp.Do(() => { relation.readTcp.ToClient?.SafeClose(); });
+                    });
+
+                }
+            }
+            else
+            {
+                LogUtils.Debug($"主动断开{relation.readTcp.RemoteEndPoint}连接");
+                EasyOp.Do(() => { relation.readTcp?.SafeClose(); });
+                EasyOp.Do(() => { relation.readTcp.ToClient?.SafeClose(); });
+            }
+            //if (TcpCenter.Instance.ConnectedTcpList.Contains(relation.readTcp))
+            //    TcpCenter.Instance.ConnectedTcpList.Remove(relation.readTcp);
+        }
+
+
+        public static bool BindTcp(P2PTcpClient readTcp, P2PTcpClient toTcp)
+        {
+            //TcpCenter.Instance.ConnectedTcpList.Add(readTcp);
+            //TcpCenter.Instance.ConnectedTcpList.Add(toTcp);
+            bool ret = true;
+            RelationTcp_Ip toRelation = new RelationTcp_Ip();
+            EasyOp.Do(() =>
+            {
+                toRelation.readTcp = readTcp;
+                toRelation.readSs = readTcp.GetStream();
+                toRelation.writeTcp = toTcp;
+                toRelation.writeSs = toTcp.GetStream();
+                toRelation.buffer = new byte[P2PGlobal.P2PSocketBufferSize];
+                StartTransferTcp_Ip(toRelation);
+            },
+            () =>
+            {
+                EasyOp.Do(() =>
+                {
+                    RelationTcp_Ip fromRelation = new RelationTcp_Ip();
+                    fromRelation.readTcp = toRelation.writeTcp;
+                    fromRelation.readSs = toRelation.writeSs;
+                    fromRelation.writeTcp = toRelation.readTcp;
+                    fromRelation.writeSs = toRelation.readSs;
+                    fromRelation.buffer = new byte[P2PGlobal.P2PSocketBufferSize];
+                    StartTransferTcp_Ip(fromRelation);
+                },
+                ex =>
+                {
+                    LogUtils.Debug($"绑定Tcp失败:{Environment.NewLine}{ex}");
+                    EasyOp.Do(readTcp.SafeClose);
+                    ret = false;
+                });
+            },
+            ex =>
+            {
+                LogUtils.Debug($"绑定Tcp失败:{Environment.NewLine}{ex}");
+                EasyOp.Do(readTcp.SafeClose);
+                EasyOp.Do(toTcp.SafeClose);
+                ret = false;
+            });
+            return ret;
+        }
+
+        private static void StartTransferTcp_Ip(RelationTcp_Ip tcp)
+        {
+            tcp.readTcp.GetStream().BeginRead(tcp.buffer, 0, tcp.buffer.Length, TransferTcp_Ip, tcp);
+        }
+        private static void TransferTcp_Ip(IAsyncResult ar)
+        {
+            RelationTcp_Ip relation = (RelationTcp_Ip)ar.AsyncState;
+
+            if (relation.readTcp.Connected)
+            {
+                int length = 0;
+                EasyOp.Do(() =>
+                {
+                    length = relation.readSs.EndRead(ar);
+                }, () =>
+                {
+                    EasyOp.Do(() =>
+                    {
+                        LogUtils.Trace($"接收到数据 From:{relation.readTcp.RemoteEndPoint} length:{length}");
+                    });
+                    if (length > 0)
+                    {
+                        if (relation.writeTcp.Connected)
+                        {
+                            EasyOp.Do(() =>
+                            {
+                                relation.writeSs.Write(relation.buffer.Take(length).ToArray(), 0, length);
+                            }, () =>
+                            {
+                                EasyOp.Do(() =>
+                                {
+                                    StartTransferTcp_Ip(relation);
+                                }, ex =>
+                                {
+                                    LogUtils.Debug($"Tcp连接已被断开 {relation.readTcp.RemoteEndPoint}");
+                                    relation.writeTcp?.SafeClose();
+                                });
+                            }, ex =>
+                            {
+                                relation.readTcp?.SafeClose();
+                            });
+
                         }
                     }
                     else
                     {
-                        break;
+                        LogUtils.Debug($"Tcp连接已被断开 {relation.readTcp.RemoteEndPoint}");
+                        relation.writeTcp?.SafeClose();
                     }
-                }
+                }, ex =>
+                {
+                    LogUtils.Debug($"Tcp连接已被断开 {relation.readTcp.RemoteEndPoint}");
+                    relation.writeTcp?.SafeClose();
+                });
             }
-            catch (Exception ex)
+            else
             {
-                LogUtils.Error($"【错误】Global_Func.ListenTcp：{Environment.NewLine}{ex}");
+                LogUtils.Debug($"Tcp连接已被断开 {relation.readTcp.RemoteEndPoint}");
+                relation.writeTcp?.SafeClose();
             }
-            //如果tcp已关闭，需要关闭相关tcp
-            try
-            {
-                tcpClient.ToClient?.SafeClose();
-            }
-            catch { }
-            LogUtils.Debug($"tcp连接{tcpClient.RemoteEndPoint}已断开");
-            TcpCenter.Instance.ConnectedTcpList.Remove(tcpClient);
-
+            //TcpCenter.Instance.ConnectedTcpList.Remove(relation.readTcp);
+            //TcpCenter.Instance.ConnectedTcpList.Remove(relation.writeTcp);
         }
-
-        public static void BindTcp(P2PTcpClient readTcp, P2PTcpClient toTcp)
+        public struct RelationTcp_Ip
         {
-            TcpCenter.Instance.ConnectedTcpList.Add(readTcp);
-            byte[] buffer = new byte[P2PGlobal.P2PSocketBufferSize];
-            NetworkStream readStream = readTcp.GetStream();
-            NetworkStream toStream = toTcp.GetStream();
-            while (readTcp.Connected)
-            {
-                int curReadLength = readStream.ReadSafe(buffer, 0, buffer.Length);
-                if (curReadLength > 0)
-                {
-                    bool isError = true;
-                    if (toTcp != null && toTcp.Connected)
-                    {
-                        try
-                        {
-                            toStream.Write(buffer, 0, curReadLength);
-                            isError = false;
-                        }
-                        catch { }
-                    }
-                    if(isError)
-                    {
-                        LogUtils.Warning($"Tcp连接{toTcp.RemoteEndPoint}已断开.");
-                        readTcp.SafeClose();
-                        break;
-                    }
-                }
-                else
-                {
-                    LogUtils.Warning($"Tcp连接{readTcp.RemoteEndPoint}已断开.");
-                    //如果tcp已关闭，需要关闭相关tcp
-                    toTcp?.SafeClose();
-                    break;
-                }
-            }
-            TcpCenter.Instance.ConnectedTcpList.Remove(readTcp);
-
+            public P2PTcpClient readTcp;
+            public P2PTcpClient writeTcp;
+            public NetworkStream readSs;
+            public NetworkStream writeSs;
+            public byte[] buffer;
         }
 
         /// <summary>
@@ -114,12 +247,12 @@ namespace P2PSocket.Client
         public static P2PCommand FindCommand(P2PTcpClient tcpClient, ReceivePacket packet)
         {
             P2PCommand command = null;
-            if (AppCenter.Instance.AllowAnonymous.Contains(packet.CommandType) || tcpClient.IsAuth)
+            if (EasyInject.Get<AppCenter>().AllowAnonymous.Contains(packet.CommandType) || tcpClient.IsAuth)
             {
-                if (AppCenter.Instance.CommandDict.ContainsKey(packet.CommandType))
+                if (EasyInject.Get<AppCenter>().CommandDict.ContainsKey(packet.CommandType))
                 {
-                    Type type = AppCenter.Instance.CommandDict[packet.CommandType];
-                    command = Activator.CreateInstance(type, tcpClient, packet.Data) as P2PCommand;
+                    Type type = EasyInject.Get<AppCenter>().CommandDict[packet.CommandType];
+                    command = Activator.CreateInstance(type, tcpClient, packet.Data.Select(t => t).ToArray()) as P2PCommand;
                 }
                 else
                 {
@@ -128,11 +261,8 @@ namespace P2PSocket.Client
             }
             else
             {
-                tcpClient.SafeClose();
-                if (tcpClient.ToClient != null && tcpClient.ToClient.Connected)
-                {
-                    tcpClient.ToClient.SafeClose();
-                }
+                tcpClient?.SafeClose();
+                tcpClient.ToClient?.SafeClose();
                 LogUtils.Warning($"拦截{tcpClient.RemoteEndPoint}未授权命令");
             }
             return command;

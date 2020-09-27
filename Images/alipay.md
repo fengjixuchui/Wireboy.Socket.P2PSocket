@@ -1,0 +1,1 @@
+![alipay](https://files.cnblogs.com/files/zhuxiaoxiao/alipay.bmp)

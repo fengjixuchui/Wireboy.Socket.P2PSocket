@@ -17,6 +17,8 @@ namespace P2PSocket.Server.Commands
     {
         readonly P2PTcpClient m_tcpClient;
         BinaryReader m_data { get; }
+        AppCenter appCenter = EasyInject.Get<AppCenter>();
+        ClientCenter clientCenter = EasyInject.Get<ClientCenter>();
         public Cmd_0x0101(P2PTcpClient tcpClient, byte[] data)
         {
             m_tcpClient = tcpClient;
@@ -24,54 +26,47 @@ namespace P2PSocket.Server.Commands
         }
         public override bool Excute()
         {
+            LogUtils.Trace($"开始处理消息：0x0101");
+            bool ret = true;
             string clientName = BinaryUtils.ReadString(m_data);
             string authCode = BinaryUtils.ReadString(m_data);
-            if (ConfigCenter.Instance.ClientAuthList.Count == 0 || ConfigCenter.Instance.ClientAuthList.Any(t => t.Match(clientName, authCode)))
+            if (appCenter.Config.ClientAuthList.Count == 0 || appCenter.Config.ClientAuthList.Any(t => t.Match(clientName, authCode)))
             {
                 bool isSuccess = true;
                 P2PTcpItem item = new P2PTcpItem();
                 item.TcpClient = m_tcpClient;
-                if (ClientCenter.Instance.TcpMap.ContainsKey(clientName))
+                if (clientCenter.TcpMap.ContainsKey(clientName))
                 {
-                    if (ClientCenter.Instance.TcpMap[clientName].TcpClient.IsDisConnected)
+                    if (clientCenter.TcpMap[clientName].TcpClient.IsDisConnected)
                     {
-                        ClientCenter.Instance.TcpMap[clientName].TcpClient.SafeClose();
-                        ClientCenter.Instance.TcpMap[clientName] = item;
+                        clientCenter.TcpMap[clientName].TcpClient?.SafeClose();
+                        clientCenter.TcpMap[clientName] = item;
                     }
                     else
                     {
                         isSuccess = false;
-                        Send_0x0101 sendPacket = new Send_0x0101(m_tcpClient, false, $"ClientName:{clientName} 已被使用");
-                        m_tcpClient.Client.Send(sendPacket.PackData());
-                        m_tcpClient.SafeClose();
-
-                        try
-                        {
-                            ClientCenter.Instance.TcpMap[clientName].TcpClient.Client.Send(new Send_0x0052().PackData());
-                        }
-                        catch (Exception)
-                        {
-                            ClientCenter.Instance.TcpMap.Remove(clientName);
-                        }
+                        Send_0x0101 sendPacket = new Send_0x0101(m_tcpClient, false, $"ClientName:{clientName} 已被使用", clientName);
+                        EasyOp.Do(() => m_tcpClient.BeginSend(sendPacket.PackData()));
+                        ret = false;
                     }
                 }
                 else
-                    ClientCenter.Instance.TcpMap.Add(clientName, item);
+                    clientCenter.TcpMap.Add(clientName, item);
                 if (isSuccess)
                 {
                     m_tcpClient.ClientName = clientName;
-                    Send_0x0101 sendPacket = new Send_0x0101(m_tcpClient, true, $"客户端{clientName}认证通过");
-                    m_tcpClient.Client.Send(sendPacket.PackData());
+                    Send_0x0101 sendPacket = new Send_0x0101(m_tcpClient, true, $"客户端{clientName}认证通过", clientName);
+                    m_tcpClient.BeginSend(sendPacket.PackData());
                 }
             }
             else
             {
-                Send_0x0101 sendPacket = new Send_0x0101(m_tcpClient, false, $"客户端{clientName}认证失败");
-                m_tcpClient.Client.Send(sendPacket.PackData());
-                m_tcpClient.SafeClose();
+                Send_0x0101 sendPacket = new Send_0x0101(m_tcpClient, false, $"客户端{clientName}认证失败", clientName);
+                m_tcpClient.BeginSend(sendPacket.PackData());
+                ret = false;
             }
 
-            return true;
+            return ret;
         }
     }
 }

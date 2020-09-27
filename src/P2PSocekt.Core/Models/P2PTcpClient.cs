@@ -247,16 +247,10 @@ namespace P2PSocket.Core.Models
 
         public void SafeClose()
         {
-            if(this.Connected)
+            if (this.Connected)
             {
-                try
-                {
-                    this.Close();
-                }
-                finally
-                {
-
-                }
+                this.GetStream().Close(3000);
+                this.Close();
             }
         }
 
@@ -273,7 +267,9 @@ namespace P2PSocket.Core.Models
 
         public DateTime LastHeartTime { set; get; } = DateTime.Now;
 
-        public bool IsDisConnected { get => LastHeartTime.AddSeconds(15) <= DateTime.Now; }
+        public bool IsDisConnected { get => LastHeartTime.AddSeconds(10) <= DateTime.Now; }
+
+        public bool IsSpeedLimit { set; get; } = false;
 
         public int P2PLocalPort { set; get; } = -1;
         String m_remoteEndPoint = "";
